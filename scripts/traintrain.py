@@ -472,76 +472,248 @@ def launch():
 
     block.launch(
         prevent_thread_lock=True,
+        share=True,
     )
 
     wait_on_server()
 
-def plot_csv(csv_path, logspath="."):
-    def get_csv(csv_path):
-        csv_path = csv_path if ".csv" in csv_path else csv_path + ".csv"
-        if csv_path:
-            for root, dirs, files in os.walk(logspath):
-                if csv_path in files:
-                    return os.path.join(root, csv_path)
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import time
+import traceback # Import traceback for more detailed error logging if needed
 
-        # 指定されたファイルが見つからない場合、最新の CSV ファイルを探す
+# Keep the rest of your imports and code above this function
+
+def plot_csv(csv_path_input, logspath="."):
+    """
+    Finds a CSV file based on input, reads it skipping metadata headers,
+    and plots the 'Loss' and 'Learning Rate' columns against 'Step'.
+
+    Args:
+        csv_path_input (str): The desired CSV filename or full path.
+                              If blank, finds the latest CSV in logspath.
+        logspath (str): The root directory to search for log files.
+
+    Returns:
+        matplotlib.figure.Figure: The generated plot figure object.
+                                  Returns a figure with an error message if unsuccessful.
+    """
+    target_csv_file = None
+
+    # --- Improved CSV File Finding ---
+    if csv_path_input and csv_path_input.strip():
+        # User provided a specific name/path
+        filename_to_find = csv_path_input.strip()
+        # Ensure it ends with .csv
+        if not filename_to_find.lower().endswith(".csv"):
+            filename_to_find += ".csv"
+
+        # Check if it's an absolute path first
+        if os.path.isabs(filename_to_find) and os.path.exists(filename_to_find):
+            target_csv_file = filename_to_find
+        else:
+            # Search within logspath recursively
+            base_filename = os.path.basename(filename_to_find)
+            possible_matches = []
+            try:
+                for root, dirs, files in os.walk(logspath):
+                    if base_filename in files:
+                        possible_matches.append(os.path.join(root, base_filename))
+                if possible_matches:
+                    # If multiple matches, prefer the one matching the full relative path if provided,
+                    # otherwise, maybe take the most recent one? Let's take the first found for simplicity,
+                    # or ideally the one matching the relative path structure if csv_path_input had slashes.
+                    # For now, just taking the first match found by walk.
+                    target_csv_file = possible_matches[0]
+                    print(f"Found specific file: {target_csv_file}") # Debugging print
+            except Exception as e:
+                 print(f"Error during os.walk in '{logspath}': {e}")
+                 # Continue to fallback (finding latest) or handle error
+
+    # --- Fallback: Find Latest CSV if specific one wasn't found or wasn't requested ---
+    if target_csv_file is None:
+        print(f"Specific file '{csv_path_input}' not found or not provided. Searching for latest CSV in '{logspath}'...")
         latest_csv = None
         latest_time = 0
+        try:
+            for root, dirs, files in os.walk(logspath):
+                for file in files:
+                    if file.lower().endswith(".csv"):
+                        file_path = os.path.join(root, file)
+                        try:
+                            file_time = os.path.getmtime(file_path)
+                            if file_time > latest_time:
+                                latest_csv = file_path
+                                latest_time = file_time
+                        except FileNotFoundError:
+                            continue # File might disappear between os.walk and getmtime
+            target_csv_file = latest_csv
+            if target_csv_file:
+                 print(f"Found latest file: {target_csv_file}") # Debugging print
+        except Exception as e:
+            print(f"Error during os.walk for latest file in '{logspath}': {e}")
+            target_csv_file = None # Ensure it's None if walk fails
 
-        for root, dirs, files in os.walk(logspath):
-            for file in files:
-                if file.endswith(".csv"):
-                    file_path = os.path.join(root, file)
-                    file_time = os.path.getmtime(file_path)
+    # --- Check if a file was found ---
+    if not target_csv_file:
+        print(f"Error: No CSV file found.")
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, "No CSV data found", ha='center', va='center', wrap=True)
+        plt.tight_layout()
+        return fig
 
-                    if file_time > latest_time:
-                        latest_csv = file_path
-                        latest_time = file_time
+    # --- Find the header row ("Step", "Loss", ...) ---
+    header_row_index = -1 # Use -1 to indicate not found initially
+    try:
+        with open(target_csv_file, "r", encoding='utf-8', errors='ignore') as f: # Keep errors='ignore' for file opening itself
+            for i, line in enumerate(f):
+                stripped_line = line.strip()
+                # Check if it looks like the data header
+                if stripped_line.startswith("Step") and "Loss" in stripped_line:
+                     # More robust check: ensure it has comma separators typical of data
+                     if "," in stripped_line:
+                         header_row_index = i
+                         break
+    except FileNotFoundError:
+        print(f"Error: Target CSV file '{target_csv_file}' not found when trying to read header.")
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"Error: File not found\n{os.path.basename(target_csv_file)}", ha='center', va='center', wrap=True)
+        plt.tight_layout()
+        return fig
+    except Exception as e:
+        print(f"Error reading header from '{target_csv_file}': {e}")
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"Error reading header:\n{os.path.basename(target_csv_file)}\n{e}", ha='center', va='center', wrap=True)
+        plt.tight_layout()
+        return fig
 
-        return latest_csv
+    if header_row_index == -1:
+        print(f"Error: Could not find the 'Step, Loss...' header row in '{target_csv_file}'.")
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"Error: Invalid header format\n{os.path.basename(target_csv_file)}", ha='center', va='center', wrap=True)
+        plt.tight_layout()
+        return fig
 
-    csv_file = get_csv(csv_path)
+    # --- Load CSV using pandas, skipping rows *before* the found header ---
+    df = None
+    try:
+        # Corrected line: Removed errors='ignore' from pd.read_csv arguments
+        df = pd.read_csv(target_csv_file,
+                         header=header_row_index,
+                         encoding='utf-8',
+                         on_bad_lines='warn')
+        print(f"Loaded DataFrame with shape: {df.shape}, columns: {df.columns.tolist()}") # Debugging print
 
-    # **"Step" から始まる行を見つける**
-    header_row = 0  # デフォルトは0行目
-    with open(csv_file, "r") as f:
-        for i, line in enumerate(f):
-            if line.startswith("Step"):
-                header_row = i
-                break  # "Step" が見つかったら終了
+        # --- Data Validation and Cleaning ---
+        # Check if essential columns exist
+        if "Step" not in df.columns or "Loss" not in df.columns:
+             raise ValueError("Essential columns 'Step' or 'Loss' not found in the CSV after header.")
 
-    # **CSVを適切なヘッダー行から読み込む**
-    df = pd.read_csv(csv_file, skiprows=header_row)
+        # Ensure essential columns are numeric, coercing errors to NaN
+        df["Step"] = pd.to_numeric(df["Step"], errors='coerce')
+        df["Loss"] = pd.to_numeric(df["Loss"], errors='coerce')
 
-    # x 軸にするカラム名（通常 "Step"）
-    x = df.columns[0]
+        # Convert learning rate columns (assuming they start with "Learning Rate")
+        lr_cols = [col for col in df.columns if col.startswith("Learning Rate")]
+        for col in lr_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    fig, ax1 = plt.subplots(figsize=(10, 6))
+        # Drop rows where Step or Loss could not be converted to numeric
+        df.dropna(subset=["Step", "Loss"], inplace=True)
 
-    # 主要な y 軸 (2 列目)
-    color = 'tab:red'
-    ax1.set_xlabel(x)
-    ax1.set_ylabel(df.columns[1], color=color)
-    ax1.plot(df[x], df[df.columns[1]], color=color)
-    ax1.tick_params(axis='y', labelcolor=color)
+        if df.empty:
+             raise ValueError("No valid numeric data found in 'Step' and 'Loss' columns.")
 
-    # 追加の y 軸 (3 列目以降)
-    ax2 = ax1.twinx()
-    color = 'tab:blue'
-    ax2.set_ylabel('Learning Rates', color=color)
-    for column in df.columns[2:]:
-        ax2.plot(df[x], df[column], label=column)
-    ax2.tick_params(axis='y', labelcolor=color)
+    except FileNotFoundError: # Should be caught earlier, but just in case
+        print(f"Error: Target CSV file '{target_csv_file}' not found during pandas loading.")
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"Error: File not found\n{os.path.basename(target_csv_file)}", ha='center', va='center', wrap=True)
+        plt.tight_layout()
+        return fig
+    except pd.errors.EmptyDataError:
+        print(f"Error: CSV file '{target_csv_file}' is empty or contains no data after header row {header_row_index}.")
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"Error: No data found\n{os.path.basename(target_csv_file)}", ha='center', va='center', wrap=True)
+        plt.tight_layout()
+        return fig
+    except ValueError as ve: # Catch specific data validation errors
+        print(f"Data validation error for '{target_csv_file}': {ve}")
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"Error: Invalid data\n{os.path.basename(target_csv_file)}\n{ve}", ha='center', va='center', wrap=True)
+        plt.tight_layout()
+        return fig
+    except TypeError as te: # Catch the specific error if it happens again (shouldn't now)
+        print(f"TypeError during pd.read_csv for '{target_csv_file}': {te}")
+        print("This likely indicates an issue with arguments passed to read_csv or the pandas version.")
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"TypeError loading CSV:\n{os.path.basename(target_csv_file)}\n{te}", ha='center', va='center', wrap=True)
+        plt.tight_layout()
+        return fig
+    except Exception as e:
+        print(f"Error loading or processing CSV '{target_csv_file}' with pandas: {e}\n{traceback.format_exc()}")
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"Error loading/processing CSV:\n{os.path.basename(target_csv_file)}\n{e}", ha='center', va='center', wrap=True)
+        plt.tight_layout()
+        return fig
 
-    plt.title("Training Result")
-    fig.tight_layout()
-    plt.legend()
-    plt.grid(True)
+    # --- Plotting ---
+    try:
+        fig, ax1 = plt.subplots(figsize=(10, 6))
 
-    return plt.gcf()
+        # Primary y-axis (Loss)
+        color = 'tab:red'
+        ax1.set_xlabel("Step")
+        ax1.set_ylabel("Loss", color=color)
+        ax1.plot(df["Step"], df["Loss"], color=color, label="Loss") # Add label
+        ax1.tick_params(axis='y', labelcolor=color)
+        ax1.grid(axis='y', linestyle=':', alpha=0.6, color=color) # Grid for primary axis
+
+        # Secondary y-axis (Learning Rates)
+        lr_cols_to_plot = [col for col in lr_cols if df[col].notna().any()] # Only plot if they have data
+        if lr_cols_to_plot:
+            ax2 = ax1.twinx()
+            color = 'tab:blue'
+            ax2.set_ylabel('Learning Rates', color=color)
+            for column in lr_cols_to_plot:
+                ax2.plot(df["Step"], df[column], label=column, alpha=0.8) # Make slightly transparent
+            ax2.tick_params(axis='y', labelcolor=color)
+            # Combine legends
+            lines, labels = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            # Place legend outside plot area if many lines
+            loc = 'best' if len(labels + labels2) < 5 else 'upper left'
+            bbox = None if len(labels + labels2) < 5 else (1.02, 1)
+            ax2.legend(lines + lines2, labels + labels2, loc=loc, bbox_to_anchor=bbox)
+        else:
+            # Only legend for ax1 if no LRs
+             ax1.legend(loc='best')
 
 
-# ここに必要な追加の関数を定義します。
+        plt.title(f"Training Result: {os.path.basename(target_csv_file)}")
+        ax1.grid(axis='x', linestyle=':', alpha=0.5) # Grid for x-axis
+        fig.tight_layout() # Adjust layout to prevent labels overlapping
+
+        # Make sure matplotlib doesn't keep the figure context open excessively
+        # Returning the figure object is usually enough for Gradio
+        # plt.close(fig) # Usually not needed unless you see memory leaks
+
+        return fig
+
+    except Exception as e:
+        print(f"Error during plotting: {e}\n{traceback.format_exc()}")
+        # Fallback: return an error plot if plotting fails
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"Error during plotting:\n{e}", ha='center', va='center', wrap=True)
+        plt.tight_layout()
+        # plt.close(fig) # Usually not needed
+        return fig
+
+# Make sure the rest of your UI code uses this function correctly
+# Example Gradio usage (already seems correct in your code):
+# reload_plot.click(plot_csv, [plot_file],[plot])
+
+
 def downscale_image(image, min_scale, fix_side=None):
     import random
     from PIL import Image
