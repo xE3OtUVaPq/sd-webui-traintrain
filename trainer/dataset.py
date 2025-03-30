@@ -22,7 +22,7 @@ def make_dataloaders(t):
         dataset = LatentsConds(t, t.image_buckets[key])
         if dataset.__len__() > 0:
             dataloaders.append(DataLoader(dataset, batch_size=t.train_batch_size, shuffle=True))
-        
+
     return dataloaders
 
 class ContinualRandomDataLoader:
@@ -58,7 +58,7 @@ class ContinualRandomDataLoader:
         # すべての DataLoader が終了した場合
         self.epoch += 1
         raise StopIteration
-                                               
+
 class LatentsConds(Dataset):
     def __init__(self, t, latents_conds):
         self.latents_conds = latents_conds
@@ -77,22 +77,22 @@ class LatentsConds(Dataset):
             origs, targs = self.latents_conds[i]
             if self.revert:
                 targs, origs = origs, targs
-            orig_latent, orig_mask, orig_cond1, orig_cond2 = origs  
+            orig_latent, orig_mask, orig_cond1, orig_cond2 = origs
             targ_latent, targ_mask, targ_cond1, targ_cond2 = targs
 
             batch["orig_latent"] = orig_latent.squeeze()
             batch["targ_latent"] = targ_latent.squeeze()
             if orig_cond1 is not None: batch["orig_cond1"] = orig_cond1 if isinstance(orig_cond1, str) else orig_cond1.squeeze().cpu()
-            if orig_cond2 is not None: batch["orig_cond2"] = orig_cond2 if isinstance(orig_cond2, str) else orig_cond2.squeeze().cpu()   
+            if orig_cond2 is not None: batch["orig_cond2"] = orig_cond2 if isinstance(orig_cond2, str) else orig_cond2.squeeze().cpu()
             if targ_cond1 is not None: batch["targ_cond1"] = targ_cond1 if isinstance(targ_cond1, str) else targ_cond1.squeeze().cpu()
-            if targ_cond2 is not None: batch["targ_cond2"] = targ_cond2 if isinstance(targ_cond2, str) else targ_cond2.squeeze().cpu()  
+            if targ_cond2 is not None: batch["targ_cond2"] = targ_cond2 if isinstance(targ_cond2, str) else targ_cond2.squeeze().cpu()
             if isinstance(orig_mask, torch.Tensor): batch["mask"] = orig_mask.squeeze().cpu()
 
         else:
             latent, mask, cond1, cond2 = self.latents_conds[i]
             batch["latent"] = latent.squeeze().cpu()
             if cond1 is not None: batch["cond1"] = cond1 if isinstance(cond1, str) else cond1.squeeze().cpu()
-            if cond2 is not None: batch["cond2"] = cond2 if isinstance(cond2, str) else cond2.squeeze().cpu()  
+            if cond2 is not None: batch["cond2"] = cond2 if isinstance(cond2, str) else cond2.squeeze().cpu()
             if isinstance(mask, torch.Tensor): batch["mask"] = mask.squeeze().cpu()
         return batch
 
@@ -101,7 +101,7 @@ TARGET_IMAGEFILES = ["jpg", "jpeg", "png", "gif", "tif", "tiff", "bmp", "webp", 
 def make_buckets(t):
     increment = t.image_buckets_step # default : 256
     # 最大ピクセル数 resolutionは[x ,y]の配列。 y >= x
-    max_pixels = t.image_size[0]*t.image_size[1] 
+    max_pixels = t.image_size[0]*t.image_size[1]
 
     # 正方形は手動で追加
     max_buckets = set()
@@ -163,58 +163,139 @@ def make_buckets(t):
 
 def find_filesets(t):
     """
-    Create two lists: 
-    1. Absolute paths of image files in the specified folder and subfolders.
-    2. Absolute paths of corresponding text files, or 'None' if no corresponding text file exists.
+    Finds image files and associated text/caption files in the lora_data_directory.
+    In Multi-ADDifT mode, it pairs original images with target images based on diff_target_name.
 
-    :param folder_path: Path to the folder to search in.
-    :param image_extensions: List of image file extensions to look for.
-    :return: Tuple of two lists (image_paths, text_paths)
+    Updates t.image_pathsets with the results.
     """
     pathsets = []
-    
-    # Walk through the folder and subfolders
+    t.image_pathsets = [] # Initialize as empty
+
+    # --- Check 1: Validate lora_data_directory ---
+    if not hasattr(t, 'lora_data_directory') or not t.lora_data_directory:
+        print(f"Error: 'lora_data_directory' is not set or is empty in the trainer object.")
+        return # Stop processing
+    if not os.path.isdir(t.lora_data_directory):
+        print(f"Error: Provided 'lora_data_directory' is not a valid directory: {t.lora_data_directory}")
+        return # Stop processing
+    # --- End Check 1 ---
+
+    print(f"Scanning directory: {t.lora_data_directory}")
+
+    # Walk through the folder and subfolders to find all relevant files first
     pathdict = {}
-    for root, dirs, files in os.walk(t.lora_data_directory):
-        for file in files:
-            if any(file.endswith(ext) for ext in TARGET_IMAGEFILES):
-                image_path = os.path.join(root, file)
+    try:
+        for root, dirs, files in os.walk(t.lora_data_directory):
+            # Skip hidden directories (optional, but often useful)
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            files = [f for f in files if not f.startswith('.')]
 
-                filename = os.path.splitext(os.path.basename(image_path))[0]
-                filename = filename.split("_id_")[0]
-                filename = filename.replace("_", ",")  
+            for file in files:
+                file_lower = file.lower()
+                if any(file_lower.endswith(f".{ext}") for ext in TARGET_IMAGEFILES):
+                    image_path = os.path.join(root, file)
+                    base_name, ext = os.path.splitext(file)
 
-                # Check for corresponding text file
-                text_file = os.path.splitext(image_path)[0] + '.txt'
-                text_file = text_file if os.path.isfile(text_file) else None
+                    # Derive potential filename tags (handle _id_ if present)
+                    filename_tag_base = base_name.split("_id_")[0] if "_id_" in base_name else base_name
+                    filename_tags = filename_tag_base.replace("_", ",") # Example transformation
 
-                # Check for corresponding caption file
-                caption_file = os.path.splitext(image_path)[0] + '.caption'
-                caption_file = caption_file if os.path.isfile(caption_file) else None
-                pathsets.append([image_path, text_file, caption_file, filename, None, None])
-                pathdict[image_path] = [image_path, text_file, caption_file, filename]
+                    # Check for corresponding text file
+                    text_file_path = os.path.join(root, base_name + '.txt')
+                    text_file_path = text_file_path if os.path.isfile(text_file_path) else None
 
-    t.db("Images : ", len(pathsets))
-    t.db("Texts : " , sum(1 for patch in pathsets if patch[1] is not None))
-    t.db("Captions : " , sum(1 for patch in pathsets if patch[2] is not None))
+                    # Check for corresponding caption file
+                    caption_file_path = os.path.join(root, base_name + '.caption')
+                    caption_file_path = caption_file_path if os.path.isfile(caption_file_path) else None
 
-    t.image_pathsets = pathsets
+                    # Store preliminary info, using image_path as key
+                    # Format: [full_image_path, full_text_path, full_caption_path, derived_filename_tags]
+                    pathdict[image_path] = [image_path, text_file_path, caption_file_path, filename_tags]
 
-    if t.mode == "Multi-ADDifT":
-        pairpathsets = []
-        for image_path, _, _, _, _, _ in pathsets:
-            base_name, ext = os.path.splitext(image_path)
-            diff_target_path = f"{base_name}{t.diff_target_name}{ext}"
-            if diff_target_path in pathdict:
-                with Image.open(pathdict[image_path][0]) as orig_img:
+    except Exception as e:
+         print(f"An error occurred during initial file scan in '{t.lora_data_directory}': {e}")
+         return # Stop processing
+
+    # If not Multi-ADDifT, just use the found paths directly
+    if t.mode != "Multi-ADDifT":
+        # Convert dict values to list for pathsets
+        pathsets = [value + [None, None] for value in pathdict.values()] # Add placeholders for pair_size, targ_path
+        t.image_pathsets = pathsets
+        print(f"Found {len(t.image_pathsets)} image files.")
+        # --- Debug counts for non-Multi mode ---
+        t.db("Images : ", len(t.image_pathsets))
+        t.db("Texts : " , sum(1 for patch in t.image_pathsets if patch[1] is not None))
+        t.db("Captions : " , sum(1 for patch in t.image_pathsets if patch[2] is not None))
+        # --- End Debug counts ---
+        return # Done for non-Multi mode
+
+    # --- Logic specific to Multi-ADDifT ---
+    print("Processing for Multi-ADDifT mode...")
+
+    # --- Check 2: Validate diff_target_name ---
+    if not hasattr(t, 'diff_target_name') or not t.diff_target_name or not isinstance(t.diff_target_name, str):
+         print("Error: 'diff_target_name' (suffix for target images) is missing or invalid for Multi-ADDifT mode.")
+         return # Stop processing, pairing is impossible
+    # --- End Check 2 ---
+
+    pairpathsets = []
+    found_pairs_count = 0
+    processed_targets = set() # Keep track of targets already added as part of a pair
+
+    # Iterate through the found image paths (keys of pathdict)
+    for image_path in pathdict:
+        original_info = pathdict[image_path] # [img_path, txt_path, cap_path, tags]
+        base_name, ext = os.path.splitext(image_path)
+
+        # Construct the expected target image path
+        diff_target_path = f"{base_name}{t.diff_target_name}{ext}"
+
+        # Check if this constructed target path exists in our dictionary of found files
+        if diff_target_path in pathdict:
+            target_info = pathdict[diff_target_path] # [target_img_path, target_txt_path, etc.]
+
+            # Ensure we haven't already processed this pair starting from the target
+            if diff_target_path in processed_targets:
+                continue
+
+            try:
+                # Get image sizes to determine minimum common size for resizing later
+                with Image.open(original_info[0]) as orig_img:
                     orig_size = orig_img.size
-                with Image.open(pathdict[diff_target_path][0]) as targ_img:
+                with Image.open(target_info[0]) as targ_img: # Use target_info[0] which is the target image path
                     targ_size = targ_img.size
-                    new_size = (min(orig_size[0], targ_size[0]), min(orig_size[1], targ_size[1]))
 
-                pairpathsets.append(pathdict[image_path] + [new_size, pathdict[diff_target_path][0]])
-                pairpathsets.append(pathdict[diff_target_path] + [new_size, None])
-        t.image_pathsets = pairpathsets
+                # Determine the size to resize both images to (minimum dimensions)
+                pair_size = (min(orig_size[0], targ_size[0]), min(orig_size[1], targ_size[1]))
+
+                # Add the original image entry with pairing info
+                # Format: [img_path, txt_path, cap_path, tags, pair_size, target_img_path]
+                pairpathsets.append(original_info + [pair_size, target_info[0]])
+
+                # Add the target image entry, marking it has no further target (for dataset loading)
+                # Format: [target_img_path, target_txt_path, target_cap_path, target_tags, pair_size, None]
+                pairpathsets.append(target_info + [pair_size, None])
+
+                processed_targets.add(diff_target_path) # Mark target as processed
+                found_pairs_count += 1
+
+            except FileNotFoundError:
+                print(f"Warning: File not found when trying to open images for pairing: {original_info[0]} or {target_info[0]}")
+            except Exception as e:
+                print(f"Error processing pair {original_info[0]} / {target_info[0]}: {e}")
+        # else:
+            # No target found for this image_path, it might be a target itself (already handled by processed_targets)
+            # or an original without a pair. In Multi-ADDifT, we often only care about pairs.
+            # print(f"Debug: No target '{diff_target_path}' found for '{image_path}'") # Uncomment for verbose debugging
+
+    t.image_pathsets = pairpathsets # Update with the processed pairs
+    print(f"Multi-ADDifT: Found {found_pairs_count} pairs based on suffix '{t.diff_target_name}'. Total entries: {len(t.image_pathsets)} (original + target).")
+
+    # Optional: Add debug counts for Multi mode if needed
+    t.db("Paired Entries : ", len(t.image_pathsets))
+    t.db("Texts : " , sum(1 for patch in t.image_pathsets if patch[1] is not None))
+    t.db("Captions : " , sum(1 for patch in t.image_pathsets if patch[2] is not None))
+
 
 import os
 from PIL import Image
@@ -238,7 +319,7 @@ def load_resize_image_and_text(t):
         ar_error = ar_errors[indice]
 
         def resize_and_crop(ar_error, image, bucket_width, bucket_height, disable_upscale):
-            if (ar_error > 0 and image.width < bucket_width or 
+            if (ar_error > 0 and image.width < bucket_width or
                 ar_error <= 0 and image.height < bucket_height) and disable_upscale:
                 return None, None
 
@@ -302,7 +383,7 @@ def load_resize_image_and_text(t):
                         flipped = resized.transpose(Image.FLIP_LEFT_RIGHT)
                         flipped_mask = torch.flip(alpha_mask, [1]) if alpha_mask is not None else None
                         t.image_buckets_raw[sub].append([flipped, flipped_mask, load_text_files(txt_path), load_text_files(cap_path), filename, img_path+"m", targ_path+"m" if targ_path is not None else targ_path])
-                
+
                 ar_errors[indice] = ar_errors[indice] + 1
         except:
             print("Failed to make sub-buckets; image bucket step or image minimum length is too big?")
@@ -310,7 +391,7 @@ def load_resize_image_and_text(t):
     for key in t.image_buckets_raw:
         print(f"bucket {key} has {len(t.image_buckets_raw[key])} images")
         t.total_images += len(t.image_buckets_raw[key])
-    
+
 def load_text_files(file_path):
     if file_path is None:
         return None
@@ -341,7 +422,7 @@ def encode_image_text(t):
                 t.image_buckets[key].append([latent, mask, emb1, emb2])
                 bar.update(1)
                 pairdict[img_path] = [latent, mask, emb1, emb2, targ_path, image]
-            
+
             if t.mode == "Multi-ADDifT":
                 t.image_buckets[key] = []
                 for img_path_key in pairdict:
@@ -358,7 +439,7 @@ def encode_image_text(t):
                         mask = torch.where(mask > 10, torch.tensor(1, dtype=torch.uint8), torch.tensor(0, dtype=torch.uint8))
 
                         mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=(latent.shape[2], latent.shape[3]), mode='nearest')
-                        #save_image1(t, mask.squeeze(0) * 255, "mask") 
+                        #save_image1(t, mask.squeeze(0) * 255, "mask")
 
                         mask = torch.cat([mask] * 4, dim=1)
                         t.image_buckets[key].append((pairdict[img_path_key][:-2], pairdict[pairdict[img_path_key][4]][:-2]))
@@ -375,14 +456,14 @@ def save_images(t,key,images):
 def save_image1(t, image, dirname=""):
     path = os.path.join(t.lora_data_directory, dirname) if dirname else t.lora_data_directory
     os.makedirs(path, exist_ok=True)
-    
+
     if isinstance(image, torch.Tensor):
         image = image.detach().cpu().numpy()
 
     if isinstance(image, np.ndarray):
-        if image.ndim == 3 and image.shape[0] == 1:  
+        if image.ndim == 3 and image.shape[0] == 1:
             image = image.squeeze(0)
-        
+
         if image.ndim == 2:  # 2D配列ならグレースケール画像
             image = Image.fromarray(image.astype(np.uint8), mode='L')
         elif image.ndim == 3:
