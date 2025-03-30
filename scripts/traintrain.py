@@ -472,7 +472,6 @@ def launch():
 
     block.launch(
         prevent_thread_lock=True,
-        share=True,
     )
 
     wait_on_server()
