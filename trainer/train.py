@@ -122,18 +122,24 @@ def train_main(jsononly_or_paths, mode, modelname, vaename, *args):
     print(" Start Training!")
 
     if standalone:
-        if not os.path.exists(modelname):
-            checkpoint_filename = os.path.join(t.models_dir, modelname) if hasattr(t, "models_dir") else modelname
-        state_dict = trainer.load_torch_file(checkpoint_filename)
-        model_version = detect_model_version(state_dict)
-        del state_dict
-        flush()
-        t.sd_typer(ver=model_version)
-        vae = None
-        vae_path = None if vaename in ["", "None"] else vaename
-        if vae_path is not None and not os.path.exists(vaename):
-            if hasattr(t, "vae_dir"):
-                vae_path = os.path.join(t.vae_dir, vae_path)
+            if not os.path.exists(modelname):
+                # If modelname is just a name, construct the full path
+                checkpoint_filename = os.path.join(t.models_dir, modelname) if hasattr(t, "models_dir") else modelname
+            else:
+                # If modelname already exists as a path, use it directly
+                checkpoint_filename = modelname  # <--- Add this else block
+
+            # Now checkpoint_filename is guaranteed to be assigned
+            state_dict = trainer.load_torch_file(checkpoint_filename)
+            model_version = detect_model_version(state_dict)
+            del state_dict
+            flush()
+            t.sd_typer(ver=model_version)
+            vae = None
+            vae_path = None if vaename in ["", "None"] else vaename
+            if vae_path is not None and not os.path.exists(vaename):
+                if hasattr(t, "vae_dir"):
+                    vae_path = os.path.join(t.vae_dir, vae_path)
 
     else:
         currentinfo = shared.sd_model.sd_checkpoint_info if hasattr(shared.sd_model, "sd_checkpoint_info") else None
